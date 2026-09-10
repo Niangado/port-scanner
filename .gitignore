@@ -1,0 +1,4 @@
+# compiled binaries and objects
+scanner 
+*.o
+*.out
