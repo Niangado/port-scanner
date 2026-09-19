@@ -1,23 +1,29 @@
 # TCP Port Scanner
 
-A command-line TCP port scanner written in C for Linux. Given a target host and
-a range of ports, it reports which ports are open by attempting a TCP connection
-to each one.
+A concurrent command-line TCP port scanner written in C for Linux. Given a target
+host and a range of ports, it reports which ports are open by attempting a TCP
+connection to each one — using a fixed pool of worker threads and per-connection
+timeouts so it stays fast and scales to the full 1–65535 port range.
 
-Built with the standard POSIX socket API (`socket()`, `connect()`), and developed
-and tested on Linux.
+Built with the standard POSIX socket API and POSIX threads (`pthreads`), and
+developed and tested on Linux.
 
 ---
 
-## What it does
+## Features
 
-- Takes a **target IP**, **start port**, and **end port** as command-line arguments.
-- Validates input: argument count, IP format, and port range.
-- Attempts a TCP connection to each port in the range (a "TCP connect scan").
-- Reports the ports that are **open**.
-
-A port is reported open when a full TCP connection succeeds — i.e. a service is
-listening and accepting connections on that port.
+- **Threaded scanning with a bounded thread pool.** A fixed number of worker
+  threads pull ports from a shared work queue, so scanning a large range uses a
+  constant number of threads instead of one-thread-per-port.
+- **Per-connection timeout.** Each connection attempt is non-blocking and capped
+  with `select()`, so filtered/unresponsive ports fail faster.
+  
+- **Scales to the full port range.** Handles `1`–`65535` with a small, fixed
+  worker pool.
+- **Input validation.** Checks argument count, IP format, and that the port range
+  is sane (`1`–`65535`, start ≤ end).
+- **Thread-safe output.** Results are printed inside a critical section so
+  concurrent workers don't interleave their output.
 
 ## Usage
 
@@ -28,58 +34,48 @@ listening and accepting connections on that port.
 Example:
 
 ```
-$ ./scanner 127.0.0.1 20 100
+$ ./scanner 127.0.0.1 1 65535
 Port 22: open
+Port 631: open
+Port 9090: open
 ```
 
-(Port 22 = SSH, which is running on the test machine.)
-
-## Building
-
-Requires `gcc` (install on RHEL-family systems with `sudo dnf install gcc`).
-
-```
-gcc scanner.c -o scanner
-```
-
-Then run it as shown in Usage above.
 
 ## How it works
 
-For each port in the requested range, the scanner:
+**Work queue + thread pool.** The program builds a queue of all ports in the
+requested range, then spawns a fixed number of worker threads. Each worker loops:
+It takes the next port from the shared queue (guarded so no two workers take the
+same one), scans it, and repeats until the queue is drained. This keeps the thread
+count constant regardless of how many ports are scanned.
 
-1. Creates a TCP socket (`socket(AF_INET, SOCK_STREAM, 0)`).
-2. Fills in a `sockaddr_in` with the target IP and the current port
-   (the port is converted to network byte order with `htons`).
-3. Calls `connect()`. A return value of `0` means the connection succeeded, so
-   the port is open; a non-zero return means it is closed or filtered.
-4. Closes the socket before moving to the next port.
+**Scanning a single port (with timeout).** For each port, a worker:
 
-Input is validated before use: the program checks that the required arguments are
-present, that the IP address parses, and that the port range is sane
-(`1`–`65535`, with start ≤ end).
+1. Creates a TCP socket and sets it to **non-blocking** with `fcntl`.
+2. Calls `connect()`, which returns immediately (the connection is now in
+   progress).
+3. Uses `select()` with a timeout to wait for the socket to become writable
+   (which signals the connection attempt has finished).
+4. If `select` times out, the port is treated as filtered/closed. If the socket
+   becomes ready, `getsockopt(SO_ERROR)` checks whether the connection actually
+   *succeeded* — success means the port is open.
+5. Closes the socket.
 
-## Limitations / future work
-
-- **Sequential and blocking.** Ports are scanned one at a time, and `connect()`
-  blocks until it succeeds or the OS times out. On remote hosts, filtered ports
-  can make each attempt slow, so large scans of remote targets are slow.
-- **No connection timeout.** A future version could use non-blocking sockets with
-  `select()` to cap how long each port attempt waits.
-- **Not concurrent.** A future version could scan many ports at once using
-  threads, dramatically speeding up large ranges.
-- **TCP connect scan only.** A more advanced version could use raw sockets to
-  perform a SYN ("half-open") scan.
-
+**Synchronization.** The shared queue index is protected so workers never grab the
+same port, and the result output is protected so concurrent prints don't
+interleave.
 
 ## What I learned
 
-A from-scratch project to practice C, the POSIX socket API, and network
-programming on Linux. Building on prior work parsing captured packets, this tool
-covers the *sending* side: constructing connections, interpreting results, and
-handling untrusted command-line input defensively. The "future work" items above
-map to operating-systems concepts (blocking vs. non-blocking I/O, `select`-based
-event loops, and threaded concurrency) that I'm studying in parallel.
+A from-scratch project to practice C, the POSIX socket API, and concurrent systems
+programming on Linux. It began as a simple sequential connect-scanner and grew,
+in stages, into a concurrent tool — each stage applying operating-systems concepts
+I was studying in parallel: **threads** and **mutual exclusion** for the worker
+pool, a **concurrent work queue** shared safely across threads, and **`select`**
+(usually taught for event-based concurrency) used here for its timeout capability
+*inside* a thread pool. Building it reinforced how these concurrency primitives
+compose into a real tool.
 
 ---
+
 Niangado
