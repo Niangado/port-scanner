@@ -8,8 +8,12 @@
 #include <string.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 #define THREAD_WORKERS 8
+#define TIMEOUT_SEC 1
+
  sem_t queue_lock;
  sem_t print_lock;
  int *queue;
@@ -38,12 +42,37 @@ void scan_port(int arg){
 			return;}
 		
 	addr.sin_port = htons(port);
-	int result = connect(sock, (struct sockaddr*) &addr, sizeof(addr));
-		if (result == 0){
-			sem_wait(&print_lock);
-		printf("Port %d: open\n", port);
-			sem_post(&print_lock);
+
+	
+	int flag = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL,flag | O_NONBLOCK);
+	 connect(sock, (struct sockaddr*) &addr, sizeof(addr));
+
+
+	fd_set writeFD;
+	FD_ZERO(&writeFD);
+	FD_SET(sock, &writeFD);
+
+
+	struct timeval timeout;
+	timeout.tv_sec = TIMEOUT_SEC;
+	timeout.tv_usec	= 0;
+
+	int rc = select(sock+1, NULL, &writeFD, NULL, &timeout);
+
+		if (rc == 0){
+
+		} else if (rc > 0){
+			int error;
+			socklen_t len = sizeof(error);
+			getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
+			if (error == 0){
+				sem_wait(&print_lock);
+				printf("Port:%d open\n", port);
+				sem_post(&print_lock);
+			}
 		}
+	
 		close(sock);
 	return;
 }
